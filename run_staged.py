@@ -52,7 +52,7 @@ async def main():
     s["bom"] = bom
     json.dump(s, open("{SF}", "w"))
     total = sum((p.get("price") or p.get("estimated_price") or 0) * (p.get("quantity") or 1) for p in bom)
-    print(f"  {{len(bom)}} items, ₹{{total:,.0f}}")
+    print(f"  {{len(bom)}} items, ${{total:,.0f}}")
 asyncio.run(main())
 ''')
 print(f"  ✓ {time.time()-t0:.1f}s\n")
@@ -94,7 +94,7 @@ async def main():
                            "pcb_design": s.get("pcb_design", {{}})
                        }})
     cad = await agent.handle(msg)
-    s["cad_files"] = cad.get("cad_files", [])
+    s["cad_files"] = cad.get("cad_files", cad.get("files", []))
     json.dump(s, open("{SF}", "w"))
     print(f"  {{len(s['cad_files'])}} files")
 asyncio.run(main())
@@ -145,7 +145,7 @@ async def main():
     s["quote"] = quote
     s["total_cost"] = quote.get("total", 0)
     json.dump(s, open("{SF}", "w"))
-    print(f"  ₹{{quote.get('total', 0):,.0f}}")
+    print(f"  ${{quote.get('total', 0):,.0f}}")
 asyncio.run(main())
 ''')
 print(f"  ✓ {time.time()-t0:.1f}s\n")
@@ -169,5 +169,5 @@ output = {
 }
 json.dump(output, open("/tmp/drone-opus.json", "w"))
 print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-print(f"✅ ALL OPUS — ₹{s.get('total_cost', 0):,.0f}")
+print(f"✅ ALL OPUS — ${s.get('total_cost', 0):,.0f}")
 print(f"Saved: /tmp/drone-opus.json")

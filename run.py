@@ -44,7 +44,7 @@ def print_search(query: str):
     
     print(f"🔍 Search: '{query}' → {len(rows)} results\n")
     for r in rows:
-        price = f"₹{r['price']:,.0f}" if r['price'] else "no price"
+        price = f"${r['price']:,.0f}" if r['price'] else "no price"
         print(f"  {price:>10}  {r['name'][:60]}")
         if r['url']:
             print(f"             {r['url'][:70]}")
@@ -61,7 +61,7 @@ def print_stats():
     
     if priced:
         stats = conn.execute("SELECT MIN(price), AVG(price), MAX(price) FROM parts WHERE price > 0").fetchone()
-        print(f"   Prices: ₹{stats[0]:,.0f} – ₹{stats[2]:,.0f} (avg ₹{stats[1]:,.0f})")
+        print(f"   Prices: ${stats[0]:,.0f} – ${stats[2]:,.0f} (avg ${stats[1]:,.0f})")
     conn.close()
 
 
@@ -94,16 +94,16 @@ async def run_build(prompt: str):
         for p in spec.bom:
             price = p.get("price", p.get("estimated_price", 0))
             qty = p.get("quantity", 1)
-            print(f"   {qty}x {p['name'][:50]:50s} ₹{price * qty:>8,.0f}")
+            print(f"   {qty}x {p['name'][:50]:50s} ${price * qty:>8,.0f}")
     
     if spec.quote:
         print(f"\n💰 Quote:")
         bd = spec.quote.get("breakdown", {})
         for key, val in bd.items():
             if isinstance(val, dict) and "total" in val:
-                print(f"   {key:20s} ₹{val['total']:>10,.2f}")
+                print(f"   {key:20s} ${val['total']:>10,.2f}")
         print(f"   {'─' * 33}")
-        print(f"   {'TOTAL':20s} ₹{spec.total_cost:>10,.2f}")
+        print(f"   {'TOTAL':20s} ${spec.total_cost:>10,.2f}")
         print(f"\n   📦 Delivery: {spec.delivery_estimate}")
 
     if spec.cad_files:
