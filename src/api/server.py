@@ -269,6 +269,13 @@ async def db_stats():
     }
 
 
+@app.get("/metrics")
+async def metrics():
+    """Pipeline performance metrics (agent timings, cache rates, throughput)."""
+    from src.metrics import PipelineMetrics
+    return PipelineMetrics().snapshot()
+
+
 @app.get("/health")
 async def health():
     db_exists = Path(DB_PATH).exists()
