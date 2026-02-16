@@ -386,38 +386,44 @@ See [`SKILL.md`](SKILL.md) for detailed integration instructions.
 ├── Dockerfile                  # Multi-stage container build
 ├── requirements.txt            # Python: anthropic, fastapi, uvicorn, aiohttp, bs4
 │
-├── src/
-│   ├── config.py               # Auto-loads Anthropic key from OpenClaw auth store
+├── src/                        # ~2,800 lines Python
+│   ├── config.py               # PipelineConfig dataclass + env overrides (84 lines)
+│   ├── types.py                # Typed dataclass models — BOMItem, PCBDesign, etc. (167 lines)
+│   ├── errors.py               # Typed exception hierarchy (75 lines)
+│   ├── validators.py           # Per-stage output validation (117 lines)
+│   ├── metrics.py              # Agent timing + cache rate metrics (84 lines)
+│   ├── logger.py               # Structured JSON logger (61 lines)
+│   ├── middleware.py           # Request tracing + concurrency limiter (49 lines)
 │   ├── agents/
-│   │   ├── orchestrator.py     # Pipeline coordinator (252 lines)
-│   │   ├── parts_agent.py      # FTS5 search + LLM selection (178 lines)
+│   │   ├── orchestrator.py     # Pipeline coordinator + JSON repair (330 lines)
+│   │   ├── parts_agent.py      # FTS5 search + LLM BOM selection (189 lines)
 │   │   ├── pcb/
-│   │   │   └── pcb_agent.py    # 3-step PCB pipeline (136 lines)
+│   │   │   └── pcb_agent.py    # 3-step PCB pipeline (123 lines)
 │   │   ├── cad/
-│   │   │   └── cad_agent.py    # OpenSCAD generation (153 lines)
+│   │   │   └── cad_agent.py    # OpenSCAD body + lid generation (153 lines)
 │   │   ├── assembler/
-│   │   │   └── assembly_agent.py  # Build guide (73 lines)
+│   │   │   └── assembly_agent.py  # Build guide (71 lines)
 │   │   └── quoter/
-│   │       └── quoter_agent.py # Deterministic USD pricing (95 lines)
+│   │       └── quoter_agent.py # Deterministic USD pricing (108 lines)
 │   ├── api/
-│   │   └── server.py           # FastAPI REST + A2A (180 lines)
+│   │   └── server.py           # FastAPI REST + SSE + A2A (308 lines)
 │   ├── db/
 │   │   └── schema.py           # SQLite + FTS5 schema (90 lines)
 │   └── scraper/
-│       ├── wayback_scraper.py  # Wayback Machine scraper with resume
+│       ├── wayback_scraper.py  # Wayback Machine scraper with resume (324 lines)
 │       └── robu_scraper.py     # Direct scraper (blocked by Cloudflare)
 │
-├── frontend/
+├── frontend/                   # ~1,600 lines TypeScript
 │   ├── src/
-│   │   ├── App.tsx             # Single-page build interface
+│   │   ├── App.tsx             # Single-page build interface (585 lines)
 │   │   ├── components/
 │   │   │   ├── MatrixPanel.tsx  # Agent activity log
-│   │   │   ├── PartsGraph.tsx   # Force-directed constellation
+│   │   │   ├── PartsGraph.tsx   # Force-directed constellation (245 lines)
 │   │   │   └── LiveGraph.tsx    # Waveform canvas
 │   │   └── lib/
-│   │       ├── api.ts          # HTTP client
+│   │       ├── api.ts          # HTTP + SSE streaming client (70 lines)
 │   │       └── types.ts        # TypeScript interfaces
-│   └── dist/                   # Production build (served by FastAPI)
+│   └── dist/                   # Production build (218KB, 68KB gzip)
 │
 ├── schemas/
 │   ├── build-request.json      # JSON Schema: input
@@ -428,16 +434,17 @@ See [`SKILL.md`](SKILL.md) for detailed integration instructions.
 │   ├── ARCHITECTURE.md         # System design + data flow
 │   └── PROTOCOL.md             # A2A protocol specification
 │
+├── tests/                      # 34 tests, 0.72s
+│   ├── test_pipeline.py        # Parser, FTS, quoter, types, repair (18 tests)
+│   └── test_validators.py      # All 5 pipeline stages (16 tests)
+│
+├── examples/
+│   ├── drone-build.json        # Full Opus 4.6 output (38 parts, $377)
+│   └── prompts.md              # 5 tested prompts with expected results
+│
 ├── run.py                      # CLI runner (single process)
 ├── run_staged.py               # Memory-efficient staged runner
-├── benchmark.py                # Pipeline latency + throughput metrics
-│
-├── tests/
-│   └── test_pipeline.py        # 18 tests: parser, FTS, quoter, types, repair
-│
-└── examples/
-    ├── drone-build.json        # Full Opus 4.6 output (38 parts, $377)
-    └── prompts.md              # 5 tested prompts with expected results
+└── benchmark.py                # Pipeline latency + throughput metrics
 ```
 
 ## Performance
