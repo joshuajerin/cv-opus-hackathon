@@ -1,0 +1,17 @@
+[project]
+name = "cv-opus-hackathon"
+version = "0.1.0"
+description = "End-to-end hardware builder - from prompt to product"
+requires-python = ">=3.11"
+dependencies = [
+    "playwright",
+    "sqlite-utils",
+    "anthropic",
+    "fastapi",
+    "uvicorn",
+    "httpx",
+    "pydantic",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
