@@ -2,11 +2,22 @@
 
 Multi-agent system that converts natural language into complete hardware project specifications. Prompt → BOM → PCB → 3D enclosure → assembly guide → USD quote.
 
-Built on Anthropic Claude Opus. 14,758-component database. Agent-to-agent protocol. One-click OpenClaw skill.
+Built on **Anthropic Claude Opus 4.6**. 14,758-component database. Agent-to-agent protocol. One-click OpenClaw skill.
 
 ```
-"autonomous drone" → 22 parts, 47 PCB connections, 11 assembly steps, $303.90
+"autonomous drone" → 38 parts, 71 PCB connections, 4-layer board, $377.48
 ```
+
+### Verified E2E Pipeline (Opus 4.6)
+| Stage | Result | Time |
+|-------|--------|------|
+| Requirements | 33 drone components extracted | 26.7s |
+| Parts | 38 selected from 1,096 candidates | 32.2s |
+| PCB | 71 connections, 4 layers, KiCad schematic | 197.6s |
+| CAD | OpenSCAD body + lid | 118.9s |
+| Assembly | 4 phases (advanced) | 111.1s |
+| Quote | $377.48 USD | 0.8s |
+| **Total** | **6 agents, 5 Opus calls** | **487.3s** |
 
 ---
 
@@ -418,16 +429,46 @@ See [`SKILL.md`](SKILL.md) for detailed integration instructions.
 │   └── PROTOCOL.md             # A2A protocol specification
 │
 ├── run.py                      # CLI runner (single process)
-└── run_staged.py               # Memory-efficient staged runner
+├── run_staged.py               # Memory-efficient staged runner
+├── benchmark.py                # Pipeline latency + throughput metrics
+│
+├── tests/
+│   └── test_pipeline.py        # 18 tests: parser, FTS, quoter, types, repair
+│
+└── examples/
+    ├── drone-build.json        # Full Opus 4.6 output (38 parts, $377)
+    └── prompts.md              # 5 tested prompts with expected results
 ```
 
 ## Performance
 
-Benchmarked on Ubuntu 22.04, 16GB RAM, Claude Opus via API:
+Benchmarked on Ubuntu 22.04, 16GB RAM, Claude Opus 4.6 via API:
 
-| Build | Parts | Connections | Steps | Total Cost | Pipeline Time |
-|-------|-------|-------------|-------|------------|---------------|
-| Kids Camera | 19 | 14 | 8 | $38.81 | 283s |
-| Autonomous Drone | 22 | 47 | 11 | $303.90 | 294s |
+| Build | Parts | DB Candidates | PCB Connections | Cost (USD) | Time |
+|-------|-------|---------------|-----------------|------------|------|
+| Autonomous Drone | 38 | 1,096 | 71 | $377.48 | 487s |
+| Kids Camera | 19 | 930 | 14 | $38.81 | 283s |
+
+**Agent Latency Breakdown (drone, Opus 4.6):**
+| Agent | Time | Tokens (est) |
+|-------|------|-------------|
+| Requirements | 26.7s | ~800 |
+| Parts (FTS5 + Opus) | 32.2s | ~4,000 |
+| PCB (3-stage) | 197.6s | ~12,000 |
+| CAD (body + lid) | 118.9s | ~6,000 |
+| Assembly | 111.1s | ~4,000 |
+| Quoter (no LLM) | 0.8s | 0 |
 
 Memory usage peaks at ~2GB during PCB agent (longest stage). The staged runner (`run_staged.py`) keeps peak memory under 500MB by running each agent in a subprocess.
+
+## Testing
+
+```bash
+# Run test suite (18 tests)
+PYTHONPATH=. python -m pytest tests/ -v
+
+# Benchmark a build
+PYTHONPATH=. python benchmark.py "weather station"
+```
+
+Tests cover: JSON parser (7 edge cases), FTS5 sanitizer, quoter math, typed models, truncation repair.
