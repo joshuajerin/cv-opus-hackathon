@@ -8,7 +8,7 @@ import json
 
 import anthropic
 
-from src.agents.orchestrator import AgentMessage, parse_json_response, MODEL_GENERATION
+from src.agents.orchestrator import AgentMessage, parse_json_response, MODEL
 
 
 class AssemblyAgent:
@@ -22,7 +22,7 @@ class AssemblyAgent:
         cad = msg.payload.get("cad", {})
 
         response = self.client.messages.create(
-            model=MODEL_GENERATION,
+            model=MODEL,
             max_tokens=5000,
             system="""You are a hardware assembly expert writing instructions for a DIY electronics project. The target reader may be a beginner.
 

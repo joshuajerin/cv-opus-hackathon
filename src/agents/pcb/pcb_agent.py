@@ -14,7 +14,7 @@ from pathlib import Path
 
 import anthropic
 
-from src.agents.orchestrator import AgentMessage, parse_json_response, MODEL_GENERATION
+from src.agents.orchestrator import AgentMessage, parse_json_response, MODEL
 
 OUTPUT_DIR = Path("output/pcb")
 
@@ -54,7 +54,7 @@ class PCBAgent:
     async def _design_circuit(self, requirements: dict, bom: list) -> dict:
         """Generate the circuit design: what connects to what."""
         response = self.client.messages.create(
-            model=MODEL_GENERATION,
+            model=MODEL,
             max_tokens=4000,
             system="""You are an expert electronics engineer. Design a circuit for the given project.
 
@@ -82,7 +82,7 @@ Be specific with pin assignments. Include power connections, decoupling, pull-up
     async def _generate_schematic(self, requirements: dict, bom: list, circuit: dict) -> str:
         """Generate a KiCad schematic file (.kicad_sch)."""
         response = self.client.messages.create(
-            model=MODEL_GENERATION,
+            model=MODEL,
             max_tokens=8000,
             system="""You are an expert KiCad PCB designer. Generate a valid KiCad 7+ schematic file (.kicad_sch format).
 
@@ -106,7 +106,7 @@ Output ONLY the raw .kicad_sch file content — no explanation, no markdown fenc
         """Generate PCB layout recommendations."""
         size = requirements.get("size_constraint", "medium")
         response = self.client.messages.create(
-            model=MODEL_GENERATION,
+            model=MODEL,
             max_tokens=3000,
             system=f"""You are a PCB layout expert. Generate layout recommendations for a {size} board.
 

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import anthropic
 
-from src.agents.orchestrator import AgentMessage, MODEL_GENERATION
+from src.agents.orchestrator import AgentMessage, MODEL
 
 OUTPUT_DIR = Path("output/cad")
 
@@ -70,7 +70,7 @@ class CADAgent:
         safety = requirements.get("safety_requirements", [])
         
         response = self.client.messages.create(
-            model=MODEL_GENERATION,
+            model=MODEL,
             max_tokens=6000,
             system=f"""You are an expert mechanical/CAD designer. Generate OpenSCAD code for a 3D-printable enclosure.
 
@@ -106,7 +106,7 @@ Output ONLY valid OpenSCAD code. No markdown, no explanation outside comments.""
     async def _generate_lid(self, requirements: dict, dims: dict) -> str:
         """Generate the lid as a separate OpenSCAD file."""
         response = self.client.messages.create(
-            model=MODEL_GENERATION,
+            model=MODEL,
             max_tokens=3000,
             system=f"""Generate OpenSCAD code for a LID that fits the enclosure body.
 

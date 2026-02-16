@@ -1,38 +1,125 @@
 """
-Orchestrator Agent — the brain.
+Orchestrator Agent — pipeline coordinator.
 
-Takes a user prompt like "I want to build a camera for an 8 year old"
-and coordinates the pipeline:
-
-1. Requirements analysis → structured project spec
-2. Parts Agent → searches DB, selects components, builds BOM
-3. PCB Agent → designs PCB layout (KiCad / vibe-coded)
-4. CAD Agent → generates 3D-printable enclosure STL
-5. Assembly Agent → creates assembly instructions
-6. Quoter Agent → calculates total cost + delivery estimate
+Sequential dispatch: prompt → requirements → parts → pcb → cad → assembly → quote.
+All agents use claude-opus-4-6. Quoter is deterministic (no LLM).
 """
 import json
 import re
 import time
+import hashlib
 from dataclasses import dataclass, field, asdict
+from pathlib import Path
 from typing import Any, Callable
 
 import anthropic
 
 import src.config  # noqa: F401 — auto-loads API key
 
-MODEL_REASONING = "claude-opus-4-6"    # For complex reasoning (requirements, parts)
-MODEL_GENERATION = "claude-opus-4-6"  # For generation tasks (PCB, CAD, assembly)
+MODEL = "claude-opus-4-6"
 
+# ── Response cache (avoids re-calling Opus on retry) ──────────
+
+_CACHE_DIR = Path("/tmp/hwb_cache")
+_CACHE_DIR.mkdir(exist_ok=True)
+
+
+def _cache_key(model: str, system: str, user: str) -> str:
+    h = hashlib.sha256(f"{model}:{system}:{user}".encode()).hexdigest()[:16]
+    return str(_CACHE_DIR / f"{h}.json")
+
+
+def _cache_get(key: str) -> str | None:
+    p = Path(key)
+    if p.exists() and (time.time() - p.stat().st_mtime) < 3600:
+        return p.read_text()
+    return None
+
+
+def _cache_put(key: str, text: str):
+    Path(key).write_text(text)
+
+
+# ── JSON extraction ───────────────────────────────────────────
+
+def _clean_json(raw: str) -> str:
+    """Fix trailing commas, comments, and other LLM JSON quirks."""
+    raw = re.sub(r',\s*([}\]])', r'\1', raw)      # trailing commas
+    raw = re.sub(r'//[^\n]*', '', raw)              # line comments
+    raw = re.sub(r'/\*.*?\*/', '', raw, flags=re.DOTALL)  # block comments
+    return raw.strip()
+
+
+def _repair_truncated_json(text: str) -> str:
+    """Attempt to close truncated JSON by balancing brackets."""
+    open_braces = text.count('{') - text.count('}')
+    open_brackets = text.count('[') - text.count(']')
+    # Strip trailing incomplete key/value
+    text = re.sub(r',?\s*"[^"]*"?\s*:?\s*"?[^"]*$', '', text)
+    text = text.rstrip(', \n\t')
+    text += '}' * max(0, open_braces)
+    text += ']' * max(0, open_brackets)
+    return text
+
+
+def parse_json_response(text: str) -> Any:
+    """Extract JSON from Claude response. Handles fences, prose, truncation."""
+    text = text.strip()
+
+    # 1. Direct parse
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Extract from ```json ... ``` fences
+    for m in re.finditer(r'```(?:json)?\s*\n(.*?)```', text, re.DOTALL):
+        try:
+            return json.loads(_clean_json(m.group(1)))
+        except json.JSONDecodeError:
+            continue
+
+    # 3. Unclosed fence (response truncated at max_tokens)
+    fence_start = re.search(r'```(?:json)?\s*\n', text)
+    if fence_start:
+        raw = text[fence_start.end():]
+        raw = _clean_json(raw)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            repaired = _repair_truncated_json(raw)
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError:
+                pass
+
+    # 4. Bracket matching (first [ or { to last ] or })
+    for sc, ec in [('[', ']'), ('{', '}')]:
+        s = text.find(sc)
+        e = text.rfind(ec)
+        if s >= 0 and e > s:
+            try:
+                return json.loads(_clean_json(text[s:e + 1]))
+            except json.JSONDecodeError:
+                repaired = _repair_truncated_json(_clean_json(text[s:]))
+                try:
+                    return json.loads(repaired)
+                except json.JSONDecodeError:
+                    continue
+
+    raise ValueError(f"JSON parse failed: {text[:150]}...")
+
+
+# ── Data classes ──────────────────────────────────────────────
 
 @dataclass
 class AgentMessage:
-    """Inter-agent message."""
+    """Inter-agent typed message envelope."""
     from_agent: str
     to_agent: str
     task: str
     payload: dict = field(default_factory=dict)
-    status: str = "pending"  # pending | in_progress | done | error
+    status: str = "pending"
     result: Any = None
     error: str | None = None
     duration_ms: int = 0
@@ -40,7 +127,7 @@ class AgentMessage:
 
 @dataclass
 class ProjectSpec:
-    """Full project specification built incrementally by agents."""
+    """Accumulates pipeline outputs into a complete project."""
     prompt: str
     requirements: dict = field(default_factory=dict)
     bom: list[dict] = field(default_factory=list)
@@ -49,51 +136,20 @@ class ProjectSpec:
     assembly: dict = field(default_factory=dict)
     quote: dict = field(default_factory=dict)
     total_cost: float = 0.0
-    currency: str = "INR"
+    currency: str = "USD"
     delivery_estimate: str = ""
     status: str = "planning"
     errors: list[str] = field(default_factory=list)
 
 
-def parse_json_response(text: str) -> Any:
-    """Extract JSON from a Claude response, handling markdown fences."""
-    # Try direct parse
-    text = text.strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    # Try extracting from ```json ... ``` blocks
-    match = re.search(r'```(?:json)?\s*\n?(.*?)```', text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(1).strip())
-        except json.JSONDecodeError:
-            pass
-
-    # Try finding first { or [ and matching to last } or ]
-    for start_char, end_char in [('{', '}'), ('[', ']')]:
-        start = text.find(start_char)
-        end = text.rfind(end_char)
-        if start != -1 and end > start:
-            try:
-                return json.loads(text[start:end + 1])
-            except json.JSONDecodeError:
-                continue
-
-    raise ValueError(f"Could not parse JSON from response: {text[:200]}...")
-
+# ── Orchestrator ──────────────────────────────────────────────
 
 class Orchestrator:
-    """Main orchestrator that routes tasks between agents."""
-
-    def __init__(self, db_path: str = "parts.db"):
+    def __init__(self):
         self.client = anthropic.Anthropic()
-        self.db_path = db_path
         self.agents: dict[str, Any] = {}
         self.message_log: list[AgentMessage] = []
-        self.on_status: Callable[[str], None] | None = None  # callback for status updates
+        self.on_status: Callable[[str], None] | None = None
 
     def register_agent(self, name: str, agent):
         self.agents[name] = agent
@@ -103,139 +159,128 @@ class Orchestrator:
         if self.on_status:
             self.on_status(msg)
 
+    def _call_claude(self, system: str, user: str, max_tokens: int = 4096) -> str:
+        """Call Claude with caching. Returns raw text."""
+        ck = _cache_key(MODEL, system, user)
+        cached = _cache_get(ck)
+        if cached:
+            return cached
+        resp = self.client.messages.create(
+            model=MODEL, max_tokens=max_tokens,
+            system=system, messages=[{"role": "user", "content": user}],
+        )
+        text = resp.content[0].text
+        _cache_put(ck, text)
+        return text
+
     async def run(self, user_prompt: str) -> ProjectSpec:
-        """Full pipeline from prompt to quote."""
         spec = ProjectSpec(prompt=user_prompt)
 
-        # ── Step 1: Analyze requirements ──
+        # ── 1. Requirements ──
         self._status(f"🧠 Analyzing: '{user_prompt}'")
         try:
             spec.requirements = await self._analyze_requirements(user_prompt)
-            self._status(f"📋 Project: {spec.requirements.get('project_name', 'Unknown')}")
-            self._status(f"   Components: {', '.join(spec.requirements.get('components_needed', []))}")
+            self._status(f"📋 Project: {spec.requirements.get('project_name', '?')}")
+            comps = spec.requirements.get('components_needed', [])
+            self._status(f"   Components: {', '.join(comps[:8])}{'...' if len(comps) > 8 else ''}")
         except Exception as e:
-            spec.errors.append(f"Requirements analysis failed: {e}")
+            spec.errors.append(f"Requirements: {e}")
             spec.status = "error"
             return spec
 
-        # ── Step 2: Parts selection (BOM) ──
+        # ── 2. Parts ──
         self._status("\n🔩 Selecting parts...")
-        msg = AgentMessage("orchestrator", "parts", "select_parts", spec.requirements)
-        bom = await self._dispatch(msg)
+        bom = await self._dispatch(AgentMessage(
+            "orchestrator", "parts", "select_parts", spec.requirements))
         if isinstance(bom, list) and bom:
             spec.bom = bom
-            total_parts_cost = sum(
-                p.get("price", p.get("estimated_price", 0)) * p.get("quantity", 1)
-                for p in bom
-            )
-            self._status(f"   ✅ {len(bom)} parts selected (₹{total_parts_cost:.0f} estimated)")
+            cost = sum((p.get("price") or p.get("estimated_price") or 0) * p.get("quantity", 1) for p in bom)
+            self._status(f"   ✅ {len(bom)} parts selected (${cost * 0.012:.0f} est)")
         else:
-            spec.errors.append("Parts selection returned empty BOM")
+            spec.errors.append("Parts: empty BOM")
 
-        # ── Step 3: PCB Design ──
+        # ── 3. PCB ──
         self._status("\n🔌 Designing PCB...")
-        msg = AgentMessage("orchestrator", "pcb", "design_pcb", {
-            "requirements": spec.requirements,
-            "bom": spec.bom,
-        })
-        pcb = await self._dispatch(msg)
+        pcb = await self._dispatch(AgentMessage(
+            "orchestrator", "pcb", "design_pcb",
+            {"requirements": spec.requirements, "bom": spec.bom}))
         if isinstance(pcb, dict) and pcb:
             spec.pcb_design = pcb
-            self._status(f"   ✅ PCB design generated")
+            conns = pcb.get("circuit_design", {}).get("connections", [])
+            self._status(f"   ✅ PCB: {len(conns)} connections")
         else:
-            spec.errors.append("PCB design failed")
+            spec.errors.append("PCB: design failed")
 
-        # ── Step 4: 3D CAD ──
-        self._status("\n📐 Generating 3D enclosure...")
-        msg = AgentMessage("orchestrator", "cad", "generate_enclosure", {
-            "requirements": spec.requirements,
-            "bom": spec.bom,
-            "pcb": spec.pcb_design or {},
-        })
-        cad = await self._dispatch(msg)
+        # ── 4. CAD ──
+        self._status("\n📐 Generating enclosure...")
+        cad = await self._dispatch(AgentMessage(
+            "orchestrator", "cad", "generate_enclosure",
+            {"requirements": spec.requirements, "bom": spec.bom,
+             "pcb_design": spec.pcb_design or {}}))
         if isinstance(cad, dict) and cad:
-            spec.cad_files = cad.get("files", [])
-            self._status(f"   ✅ {len(spec.cad_files)} CAD files generated")
+            spec.cad_files = cad.get("cad_files", cad.get("files", []))
+            self._status(f"   ✅ {len(spec.cad_files)} CAD files")
         else:
-            spec.errors.append("CAD generation failed")
+            spec.errors.append("CAD: generation failed")
 
-        # ── Step 5: Assembly ──
+        # ── 5. Assembly ──
         self._status("\n🔧 Creating assembly plan...")
-        # Slim payload — assembly doesn't need full PCB/CAD data
-        slim_bom = [{"name": p.get("name"), "quantity": p.get("quantity", 1)} for p in spec.bom]
-        msg = AgentMessage("orchestrator", "assembler", "plan_assembly", {
-            "requirements": spec.requirements,
-            "bom": slim_bom,
-            "pcb": {"has_pcb": bool(spec.pcb_design), "dimensions": (spec.pcb_design or {}).get("dimensions", {})},
-            "cad": {"files": spec.cad_files},
-        })
-        assembly = await self._dispatch(msg)
+        assembly = await self._dispatch(AgentMessage(
+            "orchestrator", "assembler", "plan_assembly",
+            {"requirements": spec.requirements, "bom": spec.bom,
+             "pcb_design": spec.pcb_design or {}, "cad_files": spec.cad_files}))
         if isinstance(assembly, dict) and assembly:
             spec.assembly = assembly
-            step_count = len(assembly.get("steps", []))
-            self._status(f"   ✅ {step_count} assembly steps")
+            self._status(f"   ✅ {len(assembly.get('steps', []))} steps")
         else:
-            spec.errors.append("Assembly plan failed")
+            spec.errors.append("Assembly: plan failed")
 
-        # ── Step 6: Quote ──
+        # ── 6. Quote ──
         self._status("\n💰 Calculating quote...")
-        msg = AgentMessage("orchestrator", "quoter", "calculate_quote", {
-            "bom": spec.bom,
-            "cad": cad or {},
-            "pcb": spec.pcb_design or {},
-        })
-        quote = await self._dispatch(msg)
+        quote = await self._dispatch(AgentMessage(
+            "orchestrator", "quoter", "calculate_quote",
+            {"bom": spec.bom, "pcb_design": spec.pcb_design or {},
+             "cad_files": spec.cad_files}))
         if isinstance(quote, dict) and quote:
             spec.quote = quote
             spec.total_cost = quote.get("total", 0)
-            spec.delivery_estimate = quote.get("delivery", "")
-            self._status(f"   ✅ Total: ₹{spec.total_cost:,.2f}")
+            self._status(f"   ✅ Total: ${spec.total_cost:,.2f}")
 
         spec.status = "ready" if not spec.errors else "partial"
-        self._status(f"\n{'✅' if spec.status == 'ready' else '⚠️'} Project {spec.status} — ₹{spec.total_cost:,.2f}")
-        if spec.errors:
-            for err in spec.errors:
-                self._status(f"   ⚠ {err}")
-
+        self._status(f"\n{'✅' if spec.status == 'ready' else '⚠️'} Project {spec.status} — ${spec.total_cost:,.2f}")
         return spec
 
     async def _analyze_requirements(self, prompt: str) -> dict:
-        """Use Claude to break down the user prompt into structured requirements."""
-        response = self.client.messages.create(
-            model=MODEL_REASONING,
-            max_tokens=2000,
-            system="""You are a hardware project analyzer. Given a user's description of what they want to build, extract structured requirements.
+        text = self._call_claude(
+            system="""You are a hardware project analyzer. Extract structured requirements from a user prompt.
 
-Return ONLY valid JSON (no markdown, no explanation):
+Return ONLY valid JSON (no markdown fences, no explanation):
 {
     "project_name": "short name",
     "target_audience": "who is this for",
     "core_function": "what does it do",
-    "components_needed": ["camera module", "microcontroller", "battery", ...],
+    "components_needed": ["ESP32", "OV2640 camera", "18650 battery", ...],
     "size_constraint": "small|medium|large",
     "battery_powered": true/false,
     "wireless_needed": true/false,
     "display_needed": true/false,
     "estimated_complexity": "beginner|intermediate|advanced",
     "safety_requirements": ["rounded edges", ...],
-    "special_notes": "anything else relevant"
+    "special_notes": "anything relevant"
 }
 
-Be specific with components_needed — use terms like "ESP32", "OV2640 camera module", "18650 battery", "OLED display", "PIR sensor" etc. Think about ALL the parts needed including passive components, connectors, and power regulation.""",
-            messages=[{"role": "user", "content": prompt}],
+Be specific in components_needed. Use part numbers. Include passive components, connectors, power regulation, wiring.""",
+            user=prompt, max_tokens=2000,
         )
-        return parse_json_response(response.content[0].text)
+        return parse_json_response(text)
 
     async def _dispatch(self, msg: AgentMessage) -> Any:
-        """Dispatch a message to the target agent."""
         self.message_log.append(msg)
         agent = self.agents.get(msg.to_agent)
-        if agent is None:
-            self._status(f"   ⚠ Agent '{msg.to_agent}' not registered")
+        if not agent:
             msg.status = "error"
-            msg.error = "Agent not registered"
+            msg.error = f"Agent '{msg.to_agent}' not registered"
             return {}
-
         msg.status = "in_progress"
         t0 = time.monotonic()
         try:
@@ -248,5 +293,5 @@ Be specific with components_needed — use terms like "ESP32", "OV2640 camera mo
             msg.status = "error"
             msg.error = str(e)
             msg.duration_ms = int((time.monotonic() - t0) * 1000)
-            self._status(f"   ❌ Agent '{msg.to_agent}' error: {e}")
+            self._status(f"   ❌ {msg.to_agent}: {e}")
             return {}

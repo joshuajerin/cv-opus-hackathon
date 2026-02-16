@@ -13,7 +13,7 @@ from pathlib import Path
 import anthropic
 
 from src.db.schema import init_db, DB_PATH
-from src.agents.orchestrator import AgentMessage, parse_json_response, MODEL_REASONING, MODEL_GENERATION
+from src.agents.orchestrator import AgentMessage, parse_json_response, MODEL
 
 
 class PartsAgent:
@@ -22,43 +22,77 @@ class PartsAgent:
         self.conn.row_factory = sqlite3.Row
         self.client = anthropic.Anthropic()
 
+    @staticmethod
+    def _sanitize_fts(query: str) -> list[str]:
+        """Extract clean search tokens from a component description.
+        
+        FTS5 chokes on parentheses, hyphens, and 'or'/'and' operators.
+        Split into individual keywords and quote each one.
+        """
+        import re
+        # Strip parenthetical notes like "(Pixhawk or similar)"
+        clean = re.sub(r'\([^)]*\)', '', query)
+        # Remove special chars
+        clean = re.sub(r'[^\w\s]', ' ', clean)
+        # Split into words, drop noise
+        stop = {'or', 'and', 'the', 'a', 'an', 'for', 'with', 'not', 'of', 'to', 'in', 'is', 'on', 'by'}
+        tokens = [w for w in clean.lower().split() if w not in stop and len(w) > 1]
+        return tokens
+
     def _search_parts(self, query: str, limit: int = 15) -> list[dict]:
-        """Search parts via FTS, falling back to LIKE if FTS fails."""
+        """Search parts via FTS (per-keyword), falling back to LIKE."""
         results = []
+        seen = set()
+        tokens = self._sanitize_fts(query)
 
-        # Try FTS first
-        try:
-            rows = self.conn.execute(
-                """SELECT p.id, p.name, p.url, p.sku, p.price, p.currency,
-                          p.in_stock, p.description, p.image_url, c.name as category
-                   FROM parts_fts f
-                   JOIN parts p ON f.rowid = p.id
-                   LEFT JOIN categories c ON p.category_id = c.id
-                   WHERE parts_fts MATCH ?
-                   ORDER BY p.price > 0 DESC, p.price ASC
-                   LIMIT ?""",
-                (query, limit),
-            ).fetchall()
-            results = [dict(r) for r in rows]
-        except Exception:
-            pass
+        # FTS: search each keyword independently, merge results
+        for token in tokens[:4]:  # cap at 4 keywords
+            try:
+                fts_q = f'"{token}"'  # quote to prevent operator interpretation
+                rows = self.conn.execute(
+                    """SELECT p.id, p.name, p.url, p.sku, p.price, p.currency,
+                              p.in_stock, p.description, p.image_url, c.name as category
+                       FROM parts_fts f
+                       JOIN parts p ON f.rowid = p.id
+                       LEFT JOIN categories c ON p.category_id = c.id
+                       WHERE parts_fts MATCH ?
+                       ORDER BY p.price > 0 DESC, p.price ASC
+                       LIMIT ?""",
+                    (fts_q, limit),
+                ).fetchall()
+                for r in rows:
+                    d = dict(r)
+                    key = d["url"] or d["name"]
+                    if key not in seen:
+                        seen.add(key)
+                        results.append(d)
+            except Exception:
+                pass
 
-        # Fallback: LIKE search
-        if not results:
-            like_q = f"%{query}%"
-            rows = self.conn.execute(
-                """SELECT p.id, p.name, p.url, p.sku, p.price, p.currency,
-                          p.in_stock, p.description, p.image_url, c.name as category
-                   FROM parts p
-                   LEFT JOIN categories c ON p.category_id = c.id
-                   WHERE p.name LIKE ?
-                   ORDER BY p.price > 0 DESC, p.price ASC
-                   LIMIT ?""",
-                (like_q, limit),
-            ).fetchall()
-            results = [dict(r) for r in rows]
+        # Also try the full phrase via LIKE for exact substring matches
+        if len(results) < limit:
+            for token in tokens[:3]:
+                try:
+                    rows = self.conn.execute(
+                        """SELECT p.id, p.name, p.url, p.sku, p.price, p.currency,
+                                  p.in_stock, p.description, p.image_url, c.name as category
+                           FROM parts p
+                           LEFT JOIN categories c ON p.category_id = c.id
+                           WHERE p.name LIKE ?
+                           ORDER BY p.price > 0 DESC, p.price ASC
+                           LIMIT ?""",
+                        (f"%{token}%", limit),
+                    ).fetchall()
+                    for r in rows:
+                        d = dict(r)
+                        key = d["url"] or d["name"]
+                        if key not in seen:
+                            seen.add(key)
+                            results.append(d)
+                except Exception:
+                    pass
 
-        return results
+        return results[:limit * 3]  # return up to 3× limit for Claude to pick from
 
     def _get_db_stats(self) -> dict:
         """Get DB stats for context."""
@@ -68,8 +102,11 @@ class PartsAgent:
         return {"total_parts": total, "priced_parts": priced, "categories": cats}
 
     async def handle(self, msg: AgentMessage) -> list[dict]:
+        # Handle both direct requirements dict and wrapped {"requirements": {...}}
         requirements = msg.payload
-        components_needed = requirements.get("components_needed", [])
+        if "requirements" in requirements and isinstance(requirements["requirements"], dict):
+            requirements = requirements["requirements"]
+        components_needed = requirements.get("components_needed", requirements.get("key_components", []))
         db_stats = self._get_db_stats()
 
         # Search for each component type
@@ -103,73 +140,47 @@ class PartsAgent:
     async def _select_from_candidates(
         self, requirements: dict, candidates: list[dict], db_stats: dict
     ) -> list[dict]:
-        """Use Claude to select the best parts from DB candidates."""
-        # Trim candidates to avoid token limits
-        slim_candidates = []
-        for c in candidates[:60]:
-            slim_candidates.append({
-                "name": c["name"],
-                "url": c.get("url", ""),
-                "price": c.get("price", 0),
-                "in_stock": c.get("in_stock", 1),
-                "category": c.get("category", ""),
-                "search_term": c.get("search_term", ""),
-            })
+        """Use Claude to select optimal BOM from DB candidates."""
+        # Compact candidate format to stay within token budget
+        slim = []
+        for c in candidates[:80]:
+            entry = c["name"]
+            if c.get("price"):
+                entry += f" [₹{c['price']}]"
+            if c.get("category"):
+                entry += f" ({c['category']})"
+            slim.append(entry)
+
+        candidate_text = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(slim))
 
         response = self.client.messages.create(
-            model=MODEL_REASONING,
-            max_tokens=4000,
-            system=f"""You are a hardware parts selector for robu.in (Indian electronics store).
-Database has {db_stats['total_parts']} parts ({db_stats['priced_parts']} with prices).
+            model=MODEL,
+            max_tokens=8192,
+            system=f"""You select hardware parts from a database of {db_stats['total_parts']} products ({db_stats['priced_parts']} priced).
 
-Given project requirements and candidate parts found in the database, select the BEST parts to build this project. You may also suggest parts that aren't in the candidates if they're commonly available on robu.in.
+Given requirements and candidate parts, return a JSON array. NO markdown fences. NO explanation. ONLY the JSON array.
 
-Return ONLY a JSON array (no markdown):
-[
-  {{
-    "name": "exact product name",
-    "url": "robu.in product URL if available",
-    "price": 123.00,
-    "quantity": 1,
-    "category": "component type",
-    "reason": "why this part"
-  }}
-]
+Each item: {{"name":"exact name","price":123.00,"quantity":1,"reason":"brief"}}
 
-Rules:
-- Include ALL parts needed (microcontroller, sensors, passive components, connectors, wires, power)
-- Prefer in-stock items with prices
-- If a needed part isn't in the candidates, add it with estimated_price and note "not in DB"
-- Use realistic INR prices
-- Don't forget basics: resistors, capacitors, headers, jumper wires, breadboard/perfboard, USB cable""",
+If a needed part isn't in candidates, add it with "estimated_price" instead of "price".
+Include everything: MCU, sensors, passives, connectors, power, wiring, mounting hardware.""",
             messages=[{
                 "role": "user",
-                "content": f"Project requirements:\n{json.dumps(requirements, indent=2)}\n\nCandidate parts from database:\n{json.dumps(slim_candidates, indent=2)}",
+                "content": f"PROJECT: {requirements.get('project_name','')}\nCOMPONENTS NEEDED: {', '.join(requirements.get('components_needed',[]))}\n\nAVAILABLE PARTS:\n{candidate_text}",
             }],
         )
         return parse_json_response(response.content[0].text)
 
     async def _suggest_parts_without_db(self, requirements: dict) -> list[dict]:
-        """When DB has no matches, use Claude to suggest a full BOM."""
+        """Fallback: suggest BOM from Claude's knowledge when DB has no matches."""
         response = self.client.messages.create(
-            model=MODEL_REASONING,
-            max_tokens=4000,
-            system="""You are a hardware parts expert familiar with robu.in's inventory (Indian electronics/robotics store).
+            model=MODEL,
+            max_tokens=8192,
+            system="""You are a hardware parts expert. Suggest a complete BOM for the given project.
 
-Given project requirements, suggest a complete, realistic Bill of Materials.
-
-Return ONLY a JSON array (no markdown):
-[
-  {
-    "name": "product name as it would appear on robu.in",
-    "estimated_price": 123.00,
-    "quantity": 1,
-    "category": "component type",
-    "reason": "why needed"
-  }
-]
-
-Use realistic INR prices. Include everything: MCU, sensors, passive components, connectors, power supply, wires, enclosure hardware (screws, standoffs), etc.""",
+Return ONLY a JSON array. NO markdown fences. NO explanation.
+Each item: {"name":"product name","estimated_price":123.00,"quantity":1,"reason":"brief"}
+Use realistic INR prices. Include everything: MCU, sensors, passives, connectors, power, wiring.""",
             messages=[{
                 "role": "user",
                 "content": f"Requirements:\n{json.dumps(requirements, indent=2)}",
