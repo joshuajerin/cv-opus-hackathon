@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react'
 import MatrixPanel from './components/MatrixPanel'
 import LiveGraph from './components/LiveGraph'
 import PartsGraph from './components/PartsGraph'
-import { buildProject, getStats } from './lib/api'
+import { buildProject, buildProjectStream, getStats } from './lib/api'
 import type { BuildResponse, AppState, LogEntry } from './lib/types'
 
 /* ═══════════════════════════════════════════
@@ -126,12 +126,16 @@ export default function App() {
     setStages({ ...INIT_STAGES })
     setFooterMsg('INITIALIZING...')
 
-    // Stage progression simulation
+    // SSE streaming with simulated stage timeline fallback
+    let useStreaming = true
+    let streamedResult: BuildResponse | null = null
+
+    // Start simulated stage timeline (overridden by SSE if available)
     STAGE_TIMELINE.forEach(({ delay, stage, msg }, i) => {
       timers.current.push(window.setTimeout(() => {
+        if (useStreaming) return // SSE took over
         setStages(prev => {
           const next = { ...prev }
-          // Complete previous stage
           if (i > 0) {
             const prevId = STAGE_TIMELINE[i - 1].stage
             next[prevId] = { status: 'complete', summary: 'DONE' }
@@ -143,18 +147,43 @@ export default function App() {
       }, delay))
     })
 
-    // Log simulation
     LOG_SIM.forEach(({ delay, entry }) => {
       timers.current.push(window.setTimeout(() => {
         setLogs(prev => [...prev, entry])
       }, delay))
     })
 
-    // Real API call
+    // Try SSE streaming first
     try {
-      const data = await buildProject(prompt)
+      for await (const event of buildProjectStream(prompt)) {
+        if (event.type === 'status') {
+          useStreaming = true
+          const msg = event.data?.message || ''
+          setLogs(prev => [...prev, { prefix: 'SSE', message: msg.slice(0, 40).toUpperCase(), status: 'ACT' }])
+          setFooterMsg(msg.toUpperCase())
+          // Map status messages to stages
+          const stageMap: Record<string, StageId> = {
+            'analyz': 'requirements', 'select': 'parts', 'pcb': 'pcb', 'design': 'pcb',
+            'enclosure': 'enclosure', 'cad': 'enclosure', 'assembly': 'assembly', 'assembl': 'assembly',
+            'quote': 'quote', 'cost': 'quote',
+          }
+          for (const [keyword, stage] of Object.entries(stageMap)) {
+            if (msg.toLowerCase().includes(keyword)) {
+              setStages(prev => ({ ...prev, [stage]: { status: 'active', summary: msg.slice(0, 30) } }))
+              break
+            }
+          }
+        } else if (event.type === 'result') {
+          streamedResult = event.data
+        } else if (event.type === 'error') {
+          throw new Error(event.data?.error || 'Build failed')
+        }
+      }
+
       timers.current.forEach(clearTimeout)
       timers.current = []
+
+      const data = streamedResult || await buildProject(prompt)
 
       const p = data.project
       const bd = p.quote?.breakdown || {}
