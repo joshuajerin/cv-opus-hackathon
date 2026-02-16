@@ -51,14 +51,27 @@ def _clean_json(raw: str) -> str:
 
 
 def _repair_truncated_json(text: str) -> str:
-    """Attempt to close truncated JSON by balancing brackets."""
+    """Aggressively repair truncated JSON by closing open structures."""
+    # Strip trailing incomplete tokens (partial strings, keys, values)
+    # Work backwards to find the last complete value
+    text = text.rstrip()
+    # Remove trailing partial string (unclosed quote)
+    if text.count('"') % 2 != 0:
+        last_q = text.rfind('"')
+        text = text[:last_q]
+    # Remove trailing partial value after last comma or bracket
+    text = re.sub(r'[,:\s]*$', '', text)
+    # Remove trailing key without value: ,"key"
+    text = re.sub(r',\s*"[^"]*"\s*$', '', text)
+    # Remove trailing incomplete object/array entry
+    text = re.sub(r',\s*\{[^}]*$', '', text)
+    text = re.sub(r',\s*\[[^\]]*$', '', text)
+    text = text.rstrip(', \n\t')
+    # Now close open brackets/braces
     open_braces = text.count('{') - text.count('}')
     open_brackets = text.count('[') - text.count(']')
-    # Strip trailing incomplete key/value
-    text = re.sub(r',?\s*"[^"]*"?\s*:?\s*"?[^"]*$', '', text)
-    text = text.rstrip(', \n\t')
-    text += '}' * max(0, open_braces)
     text += ']' * max(0, open_brackets)
+    text += '}' * max(0, open_braces)
     return text
 
 
@@ -82,16 +95,19 @@ def parse_json_response(text: str) -> Any:
     # 3. Unclosed fence (response truncated at max_tokens)
     fence_start = re.search(r'```(?:json)?\s*\n', text)
     if fence_start:
-        raw = text[fence_start.end():]
-        raw = _clean_json(raw)
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            repaired = _repair_truncated_json(raw)
+        raw = _clean_json(text[fence_start.end():])
+        for attempt in [raw, _repair_truncated_json(raw)]:
             try:
-                return json.loads(repaired)
+                return json.loads(attempt)
             except json.JSONDecodeError:
-                pass
+                continue
+        # Aggressive: try removing last N chars until it parses
+        for trim in range(1, min(500, len(raw))):
+            candidate = _repair_truncated_json(raw[:-trim])
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
 
     # 4. Bracket matching (first [ or { to last ] or })
     for sc, ec in [('[', ']'), ('{', '}')]:
