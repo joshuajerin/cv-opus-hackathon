@@ -1,13 +1,12 @@
 """
-PCB Agent — generates PCB designs via "vibe coding."
+PCB Design Agent — three-stage circuit design pipeline.
 
-Uses Claude to generate:
-1. A schematic description (component connections)
-2. KiCad schematic file
-3. PCB layout recommendations
+Stage 1: Circuit design (component interconnections, power rails)
+Stage 2: KiCad schematic generation (.kicad_sch format)
+Stage 3: Board layout (layers, dimensions, trace widths, mounting)
 
-For a hackathon demo, we focus on generating a clear schematic +
-wiring guide rather than pixel-perfect Gerbers.
+Each stage uses Claude Opus with structured JSON output.
+Schematic is saved to output/pcb/ directory.
 """
 import json
 from pathlib import Path
@@ -17,6 +16,7 @@ import anthropic
 from src.agents.orchestrator import AgentMessage, parse_json_response, MODEL
 
 OUTPUT_DIR = Path("output/pcb")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class PCBAgent:
@@ -27,110 +27,97 @@ class PCBAgent:
         requirements = msg.payload.get("requirements", {})
         bom = msg.payload.get("bom", [])
 
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        # Slim BOM for context efficiency
+        part_names = [p.get("name", "") for p in bom[:25]]
 
-        # Step 1: Generate circuit design (connections + schematic description)
+        # Stage 1: Circuit design
         print("      Generating circuit design...")
-        circuit = await self._design_circuit(requirements, bom)
+        circuit = await self._design_circuit(requirements, part_names)
 
-        # Step 2: Generate KiCad schematic
+        # Stage 2: KiCad schematic
         print("      Generating KiCad schematic...")
-        schematic = await self._generate_schematic(requirements, bom, circuit)
-        schem_path = OUTPUT_DIR / "schematic.kicad_sch"
-        schem_path.write_text(schematic)
+        schematic = await self._generate_schematic(requirements, part_names, circuit)
+        sch_path = OUTPUT_DIR / "project.kicad_sch"
+        sch_path.write_text(schematic)
 
-        # Step 3: Board layout recommendations
+        # Stage 3: Board layout
         print("      Generating board layout...")
-        layout = await self._generate_layout(requirements, bom, circuit)
+        layout = await self._generate_layout(requirements, part_names, circuit)
 
         return {
             "circuit_design": circuit,
-            "schematic_path": str(schem_path),
+            "schematic_kicad": schematic,
+            "schematic_path": str(sch_path),
             "layout": layout,
-            "dimensions": circuit.get("board_dimensions", {"width": 60, "height": 40}),
-            "notes": "AI-generated — review before fabrication",
         }
 
-    async def _design_circuit(self, requirements: dict, bom: list) -> dict:
-        """Generate the circuit design: what connects to what."""
+    async def _design_circuit(self, requirements: dict, parts: list[str]) -> dict:
         response = self.client.messages.create(
-            model=MODEL,
-            max_tokens=4000,
-            system="""You are an expert electronics engineer. Design a circuit for the given project.
+            model=MODEL, max_tokens=8192,
+            system="""You are a PCB design engineer. Design the circuit interconnections.
 
-Return ONLY JSON (no markdown):
+Return ONLY JSON (no markdown fences):
 {
-    "board_dimensions": {"width": 60, "height": 40},
-    "power_rails": [{"name": "3.3V", "source": "LDO from USB 5V"}, ...],
     "connections": [
-        {"from": "ESP32 GPIO2", "to": "OV2640 SDA", "type": "I2C"},
-        {"from": "ESP32 GPIO4", "to": "LED", "type": "digital", "notes": "via 220Ω resistor"},
-        ...
+        {"from": "Component.Pin", "to": "Component.Pin", "type": "I2C|SPI|UART|PWM|analog|power|GPIO"}
     ],
-    "decoupling": ["100nF on each IC VCC pin", "10µF on power input"],
-    "notes": "design notes and considerations"
+    "power_rails": [
+        {"name": "3V3", "voltage": "3.3V", "source": "voltage regulator", "max_current_ma": 500}
+    ],
+    "board_dimensions": {"width": 60, "height": 40},
+    "notes": "any design considerations"
 }
 
-Be specific with pin assignments. Include power connections, decoupling, pull-up resistors for I2C, etc.""",
+Be thorough with connections. Include power, ground, data, and control lines.""",
             messages=[{
                 "role": "user",
-                "content": f"Project: {json.dumps(requirements)}\nBOM: {json.dumps(bom)}",
+                "content": f"Project: {requirements.get('project_name','')}\nParts: {', '.join(parts)}",
             }],
         )
         return parse_json_response(response.content[0].text)
 
-    async def _generate_schematic(self, requirements: dict, bom: list, circuit: dict) -> str:
-        """Generate a KiCad schematic file (.kicad_sch)."""
+    async def _generate_schematic(self, requirements: dict, parts: list[str], circuit: dict) -> str:
+        conn_summary = f"{len(circuit.get('connections',[]))} connections, {len(circuit.get('power_rails',[]))} power rails"
         response = self.client.messages.create(
-            model=MODEL,
-            max_tokens=8000,
-            system="""You are an expert KiCad PCB designer. Generate a valid KiCad 7+ schematic file (.kicad_sch format).
+            model=MODEL, max_tokens=8192,
+            system="""You are a KiCad expert. Generate a .kicad_sch schematic file.
 
-Rules:
-- Use the KiCad 7 S-expression format
-- Include all components from the BOM with proper symbols
-- Wire power (VCC, GND) and signal connections per the circuit design
-- Add decoupling capacitors
-- Use proper reference designators (U1, R1, C1, etc.)
-- Include a title block
-
-Output ONLY the raw .kicad_sch file content — no explanation, no markdown fences.""",
+Return ONLY the KiCad schematic content (no markdown fences, no explanation).
+Start with (kicad_sch and end with the closing parenthesis.
+Include component symbols, wire connections, power flags, and labels.""",
             messages=[{
                 "role": "user",
-                "content": f"Project: {json.dumps(requirements)}\nBOM: {json.dumps(bom)}\nCircuit: {json.dumps(circuit)}",
+                "content": f"Project: {requirements.get('project_name','')}\nParts: {', '.join(parts[:15])}\nCircuit: {conn_summary}",
             }],
         )
-        return response.content[0].text
+        text = response.content[0].text.strip()
+        # Extract schematic content (may be in fences)
+        if "```" in text:
+            import re
+            m = re.search(r'```(?:\w*)\s*\n(.*?)```', text, re.DOTALL)
+            if m:
+                return m.group(1).strip()
+        return text
 
-    async def _generate_layout(self, requirements: dict, bom: list, circuit: dict) -> dict:
-        """Generate PCB layout recommendations."""
-        size = requirements.get("size_constraint", "medium")
+    async def _generate_layout(self, requirements: dict, parts: list[str], circuit: dict) -> dict:
         response = self.client.messages.create(
-            model=MODEL,
-            max_tokens=3000,
-            system=f"""You are a PCB layout expert. Generate layout recommendations for a {size} board.
+            model=MODEL, max_tokens=4096,
+            system="""You are a PCB layout engineer. Design the board layout.
 
-Return ONLY JSON (no markdown):
-{{
+Return ONLY JSON (no markdown fences):
+{
     "layers": 2,
-    "board_shape": "rectangular",
-    "dimensions_mm": {{"width": 60, "height": 40}},
-    "component_placement": [
-        {{"ref": "U1", "component": "ESP32", "position": "center", "notes": "keep antenna at board edge"}},
-        ...
-    ],
-    "routing_notes": ["keep I2C traces short", "ground plane on bottom layer", ...],
-    "mounting": ["4x M3 mounting holes in corners"],
-    "manufacturing": {{
-        "min_trace_width": "0.2mm",
-        "min_clearance": "0.2mm",
-        "recommended_fab": "JLCPCB or PCBWay",
-        "estimated_cost_5pcs": 150
-    }}
-}}""",
+    "dimensions_mm": {"width": 60, "height": 40},
+    "mounting_holes": 4,
+    "trace_width_mm": {"signal": 0.25, "power": 0.5},
+    "copper_weight_oz": 1,
+    "board_thickness_mm": 1.6,
+    "surface_finish": "HASL",
+    "notes": "layout considerations"
+}""",
             messages=[{
                 "role": "user",
-                "content": f"BOM: {json.dumps(bom)}\nCircuit: {json.dumps(circuit)}",
+                "content": f"Project: {requirements.get('project_name','')}\nParts: {len(parts)}\nConnections: {len(circuit.get('connections',[]))}",
             }],
         )
         return parse_json_response(response.content[0].text)
