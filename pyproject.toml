@@ -1,17 +1,22 @@
 [project]
 name = "cv-opus-hackathon"
-version = "0.1.0"
-description = "End-to-end hardware builder - from prompt to product"
+version = "1.0.0"
+description = "Multi-agent hardware builder with Opus 4.6 — prompt to BOM, PCB, CAD, assembly guide"
 requires-python = ">=3.11"
-dependencies = [
-    "playwright",
-    "sqlite-utils",
-    "anthropic",
-    "fastapi",
-    "uvicorn",
-    "httpx",
-    "pydantic",
+license = "MIT"
+authors = [
+    {name = "Joshua Jerin"}
 ]
 
-[project.optional-dependencies]
-dev = ["pytest", "ruff"]
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+python_files = "test_*.py"
+python_classes = "Test*"
+
+[tool.pyright]
+include = ["src"]
+venvPath = "."
+reportMissingImports = false
+reportMissingModuleSource = false
+pythonVersion = "3.12"
