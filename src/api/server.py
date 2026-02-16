@@ -57,6 +57,35 @@ class BuildRequest(BaseModel):
     prompt: str = Field(..., description="Natural language hardware project description")
 
 
+class AgentLogEntry(BaseModel):
+    agent: str
+    task: str
+    status: str
+    duration_ms: int
+    error: str | None = None
+
+
+class ProjectResult(BaseModel):
+    """Core project specification returned by the pipeline."""
+    prompt: str
+    status: str = "planning"
+    requirements: dict = {}
+    bom: list[dict] = []
+    pcb_design: dict | None = None
+    cad_files: list[str] = []
+    assembly: dict = {}
+    quote: dict = {}
+    total_cost: float = 0.0
+    currency: str = "USD"
+    errors: list[str] = []
+
+
+class BuildResponse(BaseModel):
+    status: str
+    project: ProjectResult
+    agent_log: list[AgentLogEntry] = []
+
+
 class A2ABuildRequest(BaseModel):
     """Agent-to-Agent protocol request envelope."""
     task: str = Field("hardware_build", description="Task identifier")
@@ -75,7 +104,7 @@ def create_orchestrator() -> Orchestrator:
     return orch
 
 
-@app.post("/build")
+@app.post("/build", response_model=BuildResponse)
 async def build_project(req: BuildRequest):
     """Build a hardware project from a natural language prompt."""
     orch = create_orchestrator()
