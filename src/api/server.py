@@ -168,7 +168,7 @@ async def build_stream(req: BuildRequest):
                 payload = msg[len("__RESULT__:"):]
                 yield f"event: result\ndata: {payload}\n\n"
             elif msg.startswith("__ERROR__:"):
-                yield f"event: error\ndata: {json.dumps({'error': msg[len('__ERROR__:'):]})}}\n\n"
+                yield f"event: error\ndata: {json.dumps({'error': msg[len('__ERROR__'):]})}\n\n"
             else:
                 yield f"event: status\ndata: {json.dumps({'message': msg})}\n\n"
 
