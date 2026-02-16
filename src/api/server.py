@@ -41,6 +41,10 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+from src.middleware import RequestTracingMiddleware, ConcurrencyLimitMiddleware
+
+app.add_middleware(RequestTracingMiddleware)
+app.add_middleware(ConcurrencyLimitMiddleware, max_concurrent=2)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
