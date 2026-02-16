@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/joshuajerin/cv-opus-hackathon/schemas/build-request.json",
+  "title": "BuildRequest",
+  "description": "Input schema for hardware build pipeline",
+  "type": "object",
+  "required": ["prompt"],
+  "properties": {
+    "prompt": {
+      "type": "string",
+      "description": "Natural language hardware project description",
+      "examples": ["autonomous drone", "camera for an 8 year old", "garden weather station"]
+    }
+  }
+}
