@@ -48,11 +48,11 @@ Built on Anthropic Claude Opus. 14,758-component database. Agent-to-agent protoc
 
 | Stage | Agent | Model | Avg Latency | Input | Output |
 |-------|-------|-------|-------------|-------|--------|
-| 1 | Orchestrator | `claude-opus-4-20250514` | 10.2s | `prompt: string` | `RequirementsSpec` |
-| 2 | Parts Agent | `claude-opus-4-20250514` | 29.6s | `RequirementsSpec` | `BOMItem[]` |
-| 3 | PCB Agent | `claude-opus-4-20250514` | 118.4s | `RequirementsSpec + BOM` | `PCBDesign` |
-| 4 | CAD Agent | `claude-opus-4-20250514` | 64.0s | `RequirementsSpec + BOM + PCB` | `CADFile[]` |
-| 5 | Assembly Agent | `claude-opus-4-20250514` | 71.9s | `RequirementsSpec + BOM + PCB + CAD` | `AssemblyGuide` |
+| 1 | Orchestrator | `claude-opus-4-6` | 10.2s | `prompt: string` | `RequirementsSpec` |
+| 2 | Parts Agent | `claude-opus-4-6` | 29.6s | `RequirementsSpec` | `BOMItem[]` |
+| 3 | PCB Agent | `claude-opus-4-6` | 118.4s | `RequirementsSpec + BOM` | `PCBDesign` |
+| 4 | CAD Agent | `claude-opus-4-6` | 64.0s | `RequirementsSpec + BOM + PCB` | `CADFile[]` |
+| 5 | Assembly Agent | `claude-opus-4-6` | 71.9s | `RequirementsSpec + BOM + PCB + CAD` | `AssemblyGuide` |
 | 6 | Quoter Agent | deterministic | <1ms | `BOM + PCB + CAD` | `Quote (USD)` |
 
 **Total pipeline latency:** ~295s (sequential execution)

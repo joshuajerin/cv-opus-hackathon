@@ -21,8 +21,8 @@ import anthropic
 
 import src.config  # noqa: F401 — auto-loads API key
 
-MODEL_REASONING = "claude-opus-4-20250514"    # For complex reasoning (requirements, parts)
-MODEL_GENERATION = "claude-opus-4-20250514"  # For generation tasks (PCB, CAD, assembly)
+MODEL_REASONING = "claude-opus-4-6"    # For complex reasoning (requirements, parts)
+MODEL_GENERATION = "claude-opus-4-6"  # For generation tasks (PCB, CAD, assembly)
 
 
 @dataclass
