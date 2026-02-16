@@ -12,11 +12,15 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Callable
 
+import asyncio
+
 import anthropic
 
 import src.config  # noqa: F401 — auto-loads API key
 
 MODEL = "claude-opus-4-6"
+MAX_RETRIES = 3
+RETRY_BASE_MS = 1000
 
 # ── Response cache (avoids re-calling Opus on retry) ──────────
 
@@ -176,18 +180,31 @@ class Orchestrator:
             self.on_status(msg)
 
     def _call_claude(self, system: str, user: str, max_tokens: int = 4096) -> str:
-        """Call Claude with caching. Returns raw text."""
+        """Call Claude with caching + retry. Returns raw text."""
         ck = _cache_key(MODEL, system, user)
         cached = _cache_get(ck)
         if cached:
             return cached
-        resp = self.client.messages.create(
-            model=MODEL, max_tokens=max_tokens,
-            system=system, messages=[{"role": "user", "content": user}],
-        )
-        text = resp.content[0].text
-        _cache_put(ck, text)
-        return text
+        last_error = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                resp = self.client.messages.create(
+                    model=MODEL, max_tokens=max_tokens,
+                    system=system, messages=[{"role": "user", "content": user}],
+                )
+                text = resp.content[0].text
+                _cache_put(ck, text)
+                return text
+            except (anthropic.RateLimitError, anthropic.APIStatusError) as e:
+                last_error = e
+                delay = RETRY_BASE_MS * (2 ** attempt) / 1000
+                self._status(f"   ⏳ Rate limited, retrying in {delay:.1f}s...")
+                time.sleep(delay)
+            except anthropic.APIConnectionError as e:
+                last_error = e
+                delay = RETRY_BASE_MS * (2 ** attempt) / 1000
+                time.sleep(delay)
+        raise last_error or RuntimeError("Claude call failed after retries")
 
     async def run(self, user_prompt: str) -> ProjectSpec:
         spec = ProjectSpec(prompt=user_prompt)
