@@ -9,6 +9,7 @@ GET  /stats         → database statistics
 GET  /health        → healthcheck
 GET  /openapi.json  → OpenAPI 3.1 schema (auto-generated)
 """
+import json
 import sqlite3
 import time
 from dataclasses import asdict
@@ -95,6 +96,52 @@ async def build_project(req: BuildRequest):
             status_code=500,
             content={"status": "error", "detail": str(e)},
         )
+
+
+## ── SSE Streaming Build ──────────────────────────────────────
+
+from starlette.responses import StreamingResponse
+import asyncio
+
+
+@app.post("/build/stream")
+async def build_stream(req: BuildRequest):
+    """Server-Sent Events stream of build progress. Each event is a stage update."""
+    async def event_generator():
+        orch = create_orchestrator()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def on_status(msg: str):
+            queue.put_nowait(msg)
+
+        orch.on_status = on_status
+
+        async def run_pipeline():
+            try:
+                spec = await orch.run(req.prompt)
+                queue.put_nowait(f"__RESULT__:{json.dumps(asdict(spec))}")
+            except Exception as e:
+                queue.put_nowait(f"__ERROR__:{str(e)}")
+            queue.put_nowait("__DONE__")
+
+        task = asyncio.create_task(run_pipeline())
+
+        while True:
+            msg = await queue.get()
+            if msg == "__DONE__":
+                yield f"event: done\ndata: {{}}\n\n"
+                break
+            elif msg.startswith("__RESULT__:"):
+                payload = msg[len("__RESULT__:"):]
+                yield f"event: result\ndata: {payload}\n\n"
+            elif msg.startswith("__ERROR__:"):
+                yield f"event: error\ndata: {json.dumps({'error': msg[len('__ERROR__:'):]})}}\n\n"
+            else:
+                yield f"event: status\ndata: {json.dumps({'message': msg})}\n\n"
+
+        await task
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 ## ── A2A Protocol ──────────────────────────────────────────────
